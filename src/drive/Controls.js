@@ -30,7 +30,6 @@ class Controls {
 
     const mouseWorldPos = Controls.getMouseWorldPosition(camera);
 
-    // ONLY send primitive numbers x and z, NOT the entire Vector3 object
     // Controls.worker.postMessage({
     //   type: 'UPDATE_REPEL',
     //   payload: {

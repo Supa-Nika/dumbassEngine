@@ -5,7 +5,42 @@ import Controls from './Controls.js';
 
 // Car is now just a static asset loader — physics lives entirely in the worker.
 
+class TextureAssets {
+  static #cache = new Map();
 
+  static loadTexture(path) {
+    if (TextureAssets.#cache.has(path)) {
+      return TextureAssets.#cache.get(path);
+    }
+
+    const promise = new Promise((resolve, reject) => {
+      const textureLoader = new THREE.TextureLoader();
+
+      textureLoader.load(
+        path,
+        (texture) => {
+          texture.wrapS = THREE.RepeatWrapping;
+          texture.wrapT = THREE.RepeatWrapping;
+          texture.repeat.set(50, 50);
+          resolve(texture);
+        },
+        (xhr) => {
+          if (xhr.total > 0) {
+            console.log(`Texture: ${(xhr.loaded / xhr.total * 100).toFixed(0)}% loaded`);
+          }
+        },
+        (error) => reject(error)
+      );
+    }).catch((error) => {
+      console.error(`Texture load error (${path}):`, error);
+      TextureAssets.#cache.delete(path); // Allow retrying on failure
+      throw error;
+    });
+
+    TextureAssets.#cache.set(path, promise);
+    return promise;
+  }
+}
 
 export class Car {
   static #template = null;   // cached loaded THREE.Group, cloned per spawn
@@ -51,6 +86,8 @@ export class Car {
   }
 }
 
+
+
 class Scene {
   #initialized = false;
   scene = null;
@@ -83,9 +120,14 @@ class Scene {
     light.position.set(5, 10, 5);
     this.scene.add(light);
 
+    const groundTexture = await TextureAssets.loadTexture('/src/assets/missing.png');
+
     const groundMesh = new THREE.Mesh(
       new THREE.BoxGeometry(1000, 0.2, 1000),
-      new THREE.MeshStandardMaterial({ color: 0x444444 })
+      new THREE.MeshStandardMaterial({ 
+        map: groundTexture,
+            roughness: 0
+      })
     );
     groundMesh.position.set(0, -3, 0);
     this.scene.add(groundMesh);
@@ -222,7 +264,7 @@ class Scene {
       }
     }
   }
-
+  
   createBall(x = 0, y = 5, z = 0, r = 3.0) {
     if (!this.worker) return;
     this.worker.postMessage({ type: 'CREATE_BALL', payload: { x, y, z, r } });

@@ -1,24 +1,17 @@
-import Scene, { Car } from './poolMinigame/Scene';
-import Controls from './poolMinigame/Controls.js';
+import Scene, { Car } from './drive/Scene.js';
+import Controls from './drive/Controls.js';
 import * as THREE from 'three';
 
 async function init() {
   await Scene.createScene();
 
-  for (let i = 0; i < 1000; i++) {
-    const r = THREE.MathUtils.randFloat(1, 2);
-    // Scene.createBall(Math.random()*100 - 50, Math.random()*100, Math.random()*100 - 50, r);
-    Scene.createCar(Math.random()*100 - 50, Math.random()*100, Math.random()*100 - 50, r);
-    Scene.createBall(Math.random()*100 - 50, Math.random()*100, Math.random()*100 - 50, r);
-
-  }
-  
   Scene.createMainCar();
 
+  // ADD: load real-world buildings around a lat/lon, e.g. Times Square
+  
   window.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const mousePos = Controls.getMouseWorldPosition(Scene.camera);
-    // const r = THREE.MathUtils.randFloat(1, 1);
     Scene.createCar(mousePos.x, 5, mousePos.z, 1);
   });
 
@@ -28,7 +21,6 @@ async function init() {
     const r = THREE.MathUtils.randFloat(1, 5);
     Scene.createBall(mousePos.x, 5, mousePos.z, r);
   });
-  
 }
 
 init();

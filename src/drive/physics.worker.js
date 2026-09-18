@@ -119,7 +119,7 @@ function applyMainCarControls(delta = 1 / 60) {
   const speed = Math.hypot(vel.x, vel.z);
 
   const minSpeed = 10;
-  const optimalSpeed = minSpeed * 2.2;
+  const optimalSpeed = minSpeed * 10;
   let maxSpeed = 120;
   const floorFactor = 0.15;
   const peakFactor = 0.4;
