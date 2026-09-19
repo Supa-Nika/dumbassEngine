@@ -3,7 +3,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import Controls from './Controls.js';
 
-// Car is now just a static asset loader — physics lives entirely in the worker.
+// ModelAssets is a generic static asset loader — physics lives entirely in the worker.
 
 class TextureAssets {
   static #cache = new Map();
@@ -42,31 +42,32 @@ class TextureAssets {
   }
 }
 
-export class Car {
-  static #template = null;   // cached loaded THREE.Group, cloned per spawn
-  static #loadingPromise = null;
+const MODEL_OBJ_PATH = '/src/assets/Car.obj';
+const MODEL_MTL_PATH = '/src/assets/Car.mtl';
 
-  static load(onLoad) {
-    if (Car.#template) {
-      onLoad(Car.#template.clone());
-      return;
-    }
+// Must match MODEL_BASE_SIZE in physics.worker.js — this is the `r` value at which
+// the model's hitbox is exactly MODEL_BASE_HALF_EXTENTS, i.e. "no scaling applied".
+const MODEL_BASE_SIZE = 3.0;
 
-    if (!Car.#loadingPromise) {
-      Car.#loadingPromise = new Promise((resolve, reject) => {
+export class ModelAssets {
+  static #cache = new Map();
+
+  static load(objPath, mtlPath, onLoad) {
+    const key = `${objPath}|${mtlPath}`;
+    let loadingPromise = ModelAssets.#cache.get(key);
+
+    if (!loadingPromise) {
+      loadingPromise = new Promise((resolve, reject) => {
         const mtlLoader = new MTLLoader();
         mtlLoader.load(
-          '/src/assets/Car.mtl',
+          mtlPath,
           (materials) => {
             materials.preload();
             const objLoader = new OBJLoader();
             objLoader.setMaterials(materials);
             objLoader.load(
-              '/src/assets/Car.obj',
-              (object) => {
-                Car.#template = object;
-                resolve(object);
-              },
+              objPath,
+              (object) => resolve(object),
               (xhr) => console.log((xhr.loaded / xhr.total * 100) + '% loaded'),
               (error) => reject(error)
             );
@@ -75,17 +76,18 @@ export class Car {
           (error) => reject(error)
         );
       }).catch((error) => {
-        console.error('Car asset load error:', error);
-        Car.#loadingPromise = null; // allow retry on next spawn
+        console.error(`Model asset load error (${key}):`, error);
+        ModelAssets.#cache.delete(key); // allow retrying on failure
         throw error;
       });
+
+      ModelAssets.#cache.set(key, loadingPromise);
     }
 
-    Car.#loadingPromise.then((template) => onLoad(template.clone()))
+    loadingPromise.then((template) => onLoad(template.clone()))
       .catch(() => {}); // already logged above
   }
 }
-
 
 
 class Scene {
@@ -98,8 +100,13 @@ class Scene {
   maxCount = 10000;
   baseRadius = 3.0;
   STRIDE = 10;
-  carMeshes = new Map();
-  mainCarMesh = null; 
+  modelMeshes = new Map();
+  followTarget = null; // any THREE.Object3D the camera should follow — see setCameraFollowTarget()
+  pendingModelRequests = new Map();
+  pendingBallRequests = new Map();
+  pendingObjectResolvers = new Map(); // objectId -> resolve (models, awaiting mesh load)
+  ballProxies = new Map();            // objectId -> Object3D (position/quat mirror)
+  nextRequestId = 0;
 
   async createScene() {
     if (this.#initialized) return;
@@ -151,9 +158,28 @@ class Scene {
    
 
     this.worker.onmessage = (e) => {
-      const { type, buffer } = e.data;
+      const { type, buffer, requestId, id } = e.data;
+
       if (type === 'TICK') {
         this.updateMeshFromBuffer(buffer);
+      }
+
+      if (type === 'OBJECT_ID') {
+        if (this.pendingModelRequests.has(requestId)) {
+          const resolve = this.pendingModelRequests.get(requestId);
+          this.pendingModelRequests.delete(requestId);
+          const entry = this.modelMeshes.get(id);
+          if (entry && entry.mesh) resolve(entry.mesh);
+          else this.pendingObjectResolvers.set(id, resolve);
+        }
+
+        if (this.pendingBallRequests.has(requestId)) {
+          const resolve = this.pendingBallRequests.get(requestId);
+          this.pendingBallRequests.delete(requestId);
+          const proxy = new THREE.Object3D(); // not added to scene — instancedMesh already draws it
+          this.ballProxies.set(id, proxy);
+          resolve(proxy); // transform fills in on the next tick
+        }
       }
     };
 
@@ -170,114 +196,130 @@ class Scene {
     animate();
   }
 
+  setCameraFollowTarget(object) {
+    this.followTarget = object ?? null;
+  }
+
   updateCamera() {
-    if (!this.mainCarMesh) return; // no main car yet — leave camera as-is
+    if (!this.followTarget) return; // nothing to follow — leave camera as-is
 
-    const car = this.mainCarMesh;
+    const target = this.followTarget;
 
-    // Offset behind and above the car, in the car's own local space,
-    // then rotated into world space by the car's current heading.
     const localOffset = new THREE.Vector3(0, 6, -12); // (x, height, distance-behind)
     const desiredPos = localOffset.clone()
-      .applyQuaternion(car.quaternion)
-      .add(car.position);
+      .applyQuaternion(target.quaternion)
+      .add(target.position);
 
-    // Smooth follow instead of hard-snapping the camera every frame —
-    // avoids jitter from the car's own rotation smoothing (smoothYaw).
     const followLerp = 0.1;
     this.camera.position.lerp(desiredPos, followLerp);
 
-    // Look slightly ahead of/above the car rather than straight at its base.
-    const lookTarget = car.position.clone().add(new THREE.Vector3(0, 1.5, 0));
+    const lookTarget = target.position.clone().add(new THREE.Vector3(0, 1.5, 0));
     this.camera.lookAt(lookTarget);
   }
 
   updateMeshFromBuffer(buffer) {
-    const STRIDE = this.STRIDE;
-    const count = buffer.length / STRIDE;
+  const STRIDE = this.STRIDE;
+  const count = buffer.length / STRIDE;
 
-    let ballIndex = 0;
-    const seenCarIds = new Set();
+  let ballIndex = 0;
+  const seenModelIds = new Set();
+  const seenBallIds = new Set();
 
-    for (let i = 0; i < count; i++) {
-      const o = i * STRIDE;
-      const x = buffer[o], y = buffer[o + 1], z = buffer[o + 2];
-      const qx = buffer[o + 3], qy = buffer[o + 4], qz = buffer[o + 5], qw = buffer[o + 6];
-      const r = buffer[o + 7];
-      const id = buffer[o + 8];
-      const typeCode = buffer[o + 9]; // 0 ball, 1 car, 2 mainCar
-      const isCar = typeCode === 1 || typeCode === 2;
+  for (let i = 0; i < count; i++) {
+    const o = i * STRIDE;
+    const x = buffer[o], y = buffer[o + 1], z = buffer[o + 2];
+    const qx = buffer[o + 3], qy = buffer[o + 4], qz = buffer[o + 5], qw = buffer[o + 6];
+    const r = buffer[o + 7];
+    const id = buffer[o + 8];
+    const typeCode = buffer[o + 9];
+    const isModel = typeCode === 1;
 
-      if (isCar) {
-        seenCarIds.add(id);
-        let entry = this.carMeshes.get(id);
+    if (isModel) {
+      seenModelIds.add(id);
+      let entry = this.modelMeshes.get(id);
 
-        if (!entry) {
-          entry = { mesh: null, isMainCar: typeCode === 2 };
-          this.carMeshes.set(id, entry);
-          Car.load((object) => {
-            entry.mesh = object;
-            this.scene.add(object);
-          });
-        }
+      if (!entry) {
+        entry = { mesh: null };
+        this.modelMeshes.set(id, entry);
+        ModelAssets.load(MODEL_OBJ_PATH, MODEL_MTL_PATH, (object) => {
+          entry.mesh = object;
+          object.scale.setScalar(r / MODEL_BASE_SIZE);
+          this.scene.add(object);
 
-        if (entry.mesh) {
-          entry.mesh.position.set(x, y, z);
-          entry.mesh.quaternion.set(qx, qy, qz, qw);
-
-          // Keep a direct reference so the render loop doesn't have to
-          // search carMeshes every frame to find the main car.
-          if (entry.isMainCar) {
-            this.mainCarMesh = entry.mesh;
+          const resolve = this.pendingObjectResolvers.get(id);
+          if (resolve) {
+            this.pendingObjectResolvers.delete(id);
+            resolve(object);
           }
-        }
-      } else {
-        this.dummy.position.set(x, y, z);
-        this.dummy.quaternion.set(qx, qy, qz, qw);
-        this.dummy.scale.setScalar(r / this.baseRadius);
-        this.dummy.updateMatrix();
-        this.instancedMesh.setMatrixAt(ballIndex, this.dummy.matrix);
-        ballIndex++;
+        });
       }
-    }
 
-    this.instancedMesh.count = ballIndex;
-    this.instancedMesh.instanceMatrix.needsUpdate = true;
+      if (entry.mesh) {
+        entry.mesh.position.set(x, y, z);
+        entry.mesh.quaternion.set(qx, qy, qz, qw);
+      }
+    } else {
+      seenBallIds.add(id);
 
-    for (const [id, entry] of this.carMeshes) {
-      if (!seenCarIds.has(id)) {
-        if (entry.mesh) {
-          this.scene.remove(entry.mesh);
-          entry.mesh.traverse((child) => {
-            if (child.isMesh) {
-              child.geometry.dispose();
-              (Array.isArray(child.material) ? child.material : [child.material])
-                .forEach((m) => m.dispose());
-            }
-          });
-        }
-        this.carMeshes.delete(id);
-        // Main car fell off / was removed — stop trying to follow a stale mesh.
-        if (entry.mesh === this.mainCarMesh) {
-          this.mainCarMesh = null;
-        }
+      this.dummy.position.set(x, y, z);
+      this.dummy.quaternion.set(qx, qy, qz, qw);
+      this.dummy.scale.setScalar(r / this.baseRadius);
+      this.dummy.updateMatrix();
+      this.instancedMesh.setMatrixAt(ballIndex, this.dummy.matrix);
+      ballIndex++;
+
+      const proxy = this.ballProxies.get(id);
+      if (proxy) {
+        proxy.position.set(x, y, z);
+        proxy.quaternion.set(qx, qy, qz, qw);
       }
     }
   }
+
+  this.instancedMesh.count = ballIndex;
+  this.instancedMesh.instanceMatrix.needsUpdate = true;
+
+  for (const [id, entry] of this.modelMeshes) {
+    if (!seenModelIds.has(id)) {
+      if (entry.mesh) {
+        this.scene.remove(entry.mesh);
+        entry.mesh.traverse((child) => {
+          if (child.isMesh) {
+            child.geometry.dispose();
+            (Array.isArray(child.material) ? child.material : [child.material])
+              .forEach((m) => m.dispose());
+          }
+        });
+      }
+      this.modelMeshes.delete(id);
+      if (entry.mesh === this.followTarget) this.followTarget = null;
+    }
+  }
+
+  for (const [id, proxy] of this.ballProxies) {
+    if (!seenBallIds.has(id)) {
+      this.ballProxies.delete(id);
+      if (proxy === this.followTarget) this.followTarget = null;
+    }
+  }
+}
   
   createBall(x = 0, y = 5, z = 0, r = 3.0) {
-    if (!this.worker) return;
-    this.worker.postMessage({ type: 'CREATE_BALL', payload: { x, y, z, r } });
+    if (!this.worker) return Promise.resolve(null);
+    const requestId = this.nextRequestId++;
+    return new Promise((resolve) => {
+      this.pendingBallRequests.set(requestId, resolve);
+      this.worker.postMessage({ type: 'CREATE_BALL', payload: { x, y, z, r, requestId } });
+    });
   }
 
-  createCar(x = 0, y = 5, z = 0, r = 3.0) {
-    if (!this.worker) return;
-    this.worker.postMessage({ type: 'CREATE_CAR', payload: { x, y, z, r } });
-  }
-
-  createMainCar(x = 0, y = 5, z = 0, r = 1.0){
-    if (!this.worker) return;
-    this.worker.postMessage({ type: 'CREATE_MAIN_CAR', payload: { x, y, z, r } });
+  createModel(x = 0, y = 5, z = 0, r = 3.0) {
+    if (!this.worker) return Promise.resolve(null);
+    const requestId = this.nextRequestId++;
+    return new Promise((resolve) => {
+      this.pendingModelRequests.set(requestId, resolve);
+      this.worker.postMessage({ type: 'CREATE_MODEL', payload: { x, y, z, r, requestId } });
+    });
   }
 }
 
