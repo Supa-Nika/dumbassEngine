@@ -100,12 +100,15 @@ class Scene {
   maxCount = 10000;
   baseRadius = 3.0;
   STRIDE = 10;
+  JOINTSTRIDE = 5;
   modelMeshes = new Map();
   followTarget = null; // any THREE.Object3D the camera should follow — see setCameraFollowTarget()
   pendingModelRequests = new Map();
   pendingBallRequests = new Map();
+  pendingJointRequests = new Map();
   pendingObjectResolvers = new Map(); // objectId -> resolve (models, awaiting mesh load)
   ballProxies = new Map();            // objectId -> Object3D (position/quat mirror)
+  jointLines = new Map();             // "idA_idB" -> THREE.Line
   nextRequestId = 0;
 
   async createScene() {
@@ -158,10 +161,10 @@ class Scene {
    
 
     this.worker.onmessage = (e) => {
-      const { type, buffer, requestId, id } = e.data;
+      const { type, objectBuffer, jointBuffer, requestId, id } = e.data;
 
       if (type === 'TICK') {
-        this.updateMeshFromBuffer(buffer);
+        this.updateMeshFromBuffer(objectBuffer, jointBuffer);
       }
 
       if (type === 'OBJECT_ID') {
@@ -177,8 +180,17 @@ class Scene {
           const resolve = this.pendingBallRequests.get(requestId);
           this.pendingBallRequests.delete(requestId);
           const proxy = new THREE.Object3D(); // not added to scene — instancedMesh already draws it
+          proxy.userData.physicsId = id; // lets createJoint() accept this object directly
           this.ballProxies.set(id, proxy);
           resolve(proxy); // transform fills in on the next tick
+        }
+      }
+
+      if (type === 'JOINT_ID') {
+        if (this.pendingJointRequests.has(requestId)) {
+          const resolve = this.pendingJointRequests.get(requestId);
+          this.pendingJointRequests.delete(requestId);
+          resolve(id); // may be null if the worker couldn't find the two bodies
         }
       }
     };
@@ -217,9 +229,9 @@ class Scene {
     this.camera.lookAt(lookTarget);
   }
 
-  updateMeshFromBuffer(buffer) {
+  updateMeshFromBuffer(objectBuffer, jointBuffer) {
   const STRIDE = this.STRIDE;
-  const count = buffer.length / STRIDE;
+  const count = objectBuffer.length / STRIDE;
 
   let ballIndex = 0;
   const seenModelIds = new Set();
@@ -227,11 +239,11 @@ class Scene {
 
   for (let i = 0; i < count; i++) {
     const o = i * STRIDE;
-    const x = buffer[o], y = buffer[o + 1], z = buffer[o + 2];
-    const qx = buffer[o + 3], qy = buffer[o + 4], qz = buffer[o + 5], qw = buffer[o + 6];
-    const r = buffer[o + 7];
-    const id = buffer[o + 8];
-    const typeCode = buffer[o + 9];
+    const x = objectBuffer[o], y = objectBuffer[o + 1], z = objectBuffer[o + 2];
+    const qx = objectBuffer[o + 3], qy = objectBuffer[o + 4], qz = objectBuffer[o + 5], qw = objectBuffer[o + 6];
+    const r = objectBuffer[o + 7];
+    const id = objectBuffer[o + 8];
+    const typeCode = objectBuffer[o + 9];
     const isModel = typeCode === 1;
 
     if (isModel) {
@@ -243,6 +255,7 @@ class Scene {
         this.modelMeshes.set(id, entry);
         ModelAssets.load(MODEL_OBJ_PATH, MODEL_MTL_PATH, (object) => {
           entry.mesh = object;
+          object.userData.physicsId = id; // lets createJoint() accept this object directly
           object.scale.setScalar(r / MODEL_BASE_SIZE);
           this.scene.add(object);
 
@@ -302,7 +315,63 @@ class Scene {
       if (proxy === this.followTarget) this.followTarget = null;
     }
   }
+
+  this.updateJointLines(jointBuffer);
 }
+
+  getObjectPosition(id) {
+    const modelEntry = this.modelMeshes.get(id);
+    if (modelEntry && modelEntry.mesh) return modelEntry.mesh.position;
+
+    const proxy = this.ballProxies.get(id);
+    if (proxy) return proxy.position;
+
+    return null;
+  }
+
+  updateJointLines(jointBuffer) {
+    if (!jointBuffer) return;
+
+    const STRIDE = this.JOINTSTRIDE;
+    const count = jointBuffer.length / STRIDE;
+    const seenKeys = new Set();
+
+    for (let i = 0; i < count; i++) {
+      const o = i * STRIDE;
+      const idA = jointBuffer[o];
+      const idB = jointBuffer[o + 1];
+      const key = `${idA}_${idB}`;
+
+      const posA = this.getObjectPosition(idA);
+      const posB = this.getObjectPosition(idB);
+      if (!posA || !posB) continue; // meshes haven't loaded yet (e.g. a model still fetching)
+
+      seenKeys.add(key);
+
+      let line = this.jointLines.get(key);
+      if (!line) {
+        const geometry = new THREE.BufferGeometry().setFromPoints([posA, posB]);
+        const material = new THREE.LineBasicMaterial({ color: 0xffaa00 });
+        line = new THREE.Line(geometry, material);
+        this.scene.add(line);
+        this.jointLines.set(key, line);
+      } else {
+        const positions = line.geometry.attributes.position;
+        positions.setXYZ(0, posA.x, posA.y, posA.z);
+        positions.setXYZ(1, posB.x, posB.y, posB.z);
+        positions.needsUpdate = true;
+      }
+    }
+
+    for (const [key, line] of this.jointLines) {
+      if (!seenKeys.has(key)) {
+        this.scene.remove(line);
+        line.geometry.dispose();
+        line.material.dispose();
+        this.jointLines.delete(key);
+      }
+    }
+  }
   
   createBall(x = 0, y = 5, z = 0, r = 3.0) {
     if (!this.worker) return Promise.resolve(null);
@@ -319,6 +388,24 @@ class Scene {
     return new Promise((resolve) => {
       this.pendingModelRequests.set(requestId, resolve);
       this.worker.postMessage({ type: 'CREATE_MODEL', payload: { x, y, z, r, requestId } });
+    });
+  }
+
+  createJoint(objA, objB, restLength = 3, stiffness = 3, damping = 3) {
+    if (!this.worker) return Promise.resolve(null);
+
+    const idA = typeof objA === 'number' ? objA : objA?.userData?.physicsId;
+    const idB = typeof objB === 'number' ? objB : objB?.userData?.physicsId;
+
+    if (idA == null || idB == null) {
+      console.warn('createJoint: could not resolve a physics id for one or both objects', objA, objB);
+      return Promise.resolve(null);
+    }
+
+    const requestId = this.nextRequestId++;
+    return new Promise((resolve) => {
+      this.pendingJointRequests.set(requestId, resolve);
+      this.worker.postMessage({ type: 'CREATE_JOINT', payload: { idA, idB, restLength, stiffness, damping, requestId } });
     });
   }
 }

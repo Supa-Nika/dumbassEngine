@@ -1,10 +1,12 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 
-
 let world = null;
 
 const objects = [];
 let nextId = 0;
+
+const relations = [];
+let nextJointId = 0;
 
 const TYPE_CODE = { ball: 0, model: 1 };
 
@@ -12,6 +14,9 @@ const MODEL_BASE_HALF_EXTENTS = { x: 1.0, y: 0.6, z: 2.2 };
 const MODEL_BASE_SIZE = 3.0;
 
 const pendingSpawns = [];
+
+const pendingJoints = [];
+
 let mousePos = null;
 let repelRadius = 5;
 let repelStrength = 10;
@@ -20,6 +25,7 @@ const FIXED_DT = 1 / 120;        // seconds of sim time consumed per physics ste
 const TIME_SCALE = 2.0;
 const MAX_STEPS_PER_TICK = 5;
 const STRIDE = 10; // x,y,z, qx,qy,qz,qw, r, id, typeCode
+const JOINTSTRIDE = 5; // idA, idB, restLength, stiffness, damping
 
 let lastTime = null;
 let accumulator = 0;
@@ -66,31 +72,54 @@ function stepPhysics() {
 
   for (let i = objects.length - 1; i >= 0; i--) {
     if (objects[i].body.translation().y < -50) {
-      world.removeRigidBody(objects[i].body);
+      const removedId = objects[i].id;
+      world.removeRigidBody(objects[i].body); // Rapier also drops any impulse joints on this body
       objects.splice(i, 1);
+
+      // Keep our bookkeeping in sync so we stop reporting dead joints to the main thread.
+      for (let j = relations.length - 1; j >= 0; j--) {
+        if (relations[j].idA === removedId || relations[j].idB === removedId) {
+          relations.splice(j, 1);
+        }
+      }
     }
   }
 }
 
 function sendTick() {
-  const buffer = new Float32Array(objects.length * STRIDE);
+  const objectBuffer = new Float32Array(objects.length * STRIDE);
   for (let i = 0; i < objects.length; i++) {
     const { body, radius, id, type } = objects[i];
     const pos = body.translation();
     const rot = body.rotation();
     const idx = i * STRIDE;
-    buffer[idx] = pos.x;
-    buffer[idx + 1] = pos.y;
-    buffer[idx + 2] = pos.z;
-    buffer[idx + 3] = rot.x;
-    buffer[idx + 4] = rot.y;
-    buffer[idx + 5] = rot.z;
-    buffer[idx + 6] = rot.w;
-    buffer[idx + 7] = radius;
-    buffer[idx + 8] = id;
-    buffer[idx + 9] = TYPE_CODE[type];
+    objectBuffer[idx] = pos.x;
+    objectBuffer[idx + 1] = pos.y;
+    objectBuffer[idx + 2] = pos.z;
+    objectBuffer[idx + 3] = rot.x;
+    objectBuffer[idx + 4] = rot.y;
+    objectBuffer[idx + 5] = rot.z;
+    objectBuffer[idx + 6] = rot.w;
+    objectBuffer[idx + 7] = radius;
+    objectBuffer[idx + 8] = id;
+    objectBuffer[idx + 9] = TYPE_CODE[type];
   }
-  self.postMessage({ type: 'TICK', buffer }, [buffer.buffer]);
+
+  const jointBuffer = new Float32Array(relations.length * JOINTSTRIDE);
+  for (let i = 0; i < relations.length; i++) {
+    const { idA, idB, restLength, stiffness, damping } = relations[i];
+    const idx = i * JOINTSTRIDE;
+    jointBuffer[idx] = idA;
+    jointBuffer[idx + 1] = idB;
+    jointBuffer[idx + 2] = restLength ?? 3;
+    jointBuffer[idx + 3] = stiffness ?? 3;
+    jointBuffer[idx + 4] = damping ?? 3;
+  }
+
+  self.postMessage(
+    { type: 'TICK', objectBuffer, jointBuffer },
+    [objectBuffer.buffer, jointBuffer.buffer]
+  );
 }
 
 self.onmessage = async (e) => {
@@ -115,6 +144,13 @@ self.onmessage = async (e) => {
       self.postMessage({ type: 'OBJECT_ID', requestId: spawn.requestId, id });
     }
 
+    // Bodies now exist, so any joints that were requested before INIT can be resolved.
+    while (pendingJoints.length > 0) {
+      const joint = pendingJoints.shift();
+      const id = createJoint(joint.idA, joint.idB, joint.restLength, joint.stiffness, joint.damping);
+      self.postMessage({ type: 'JOINT_ID', requestId: joint.requestId, id });
+    }
+
     self.postMessage({ type: 'READY' });
     startLoop();
   }
@@ -136,6 +172,16 @@ self.onmessage = async (e) => {
     } else {
       const id = createBody(spawn);
       self.postMessage({ type: 'OBJECT_ID', requestId: spawn.requestId, id });
+    }
+  }
+
+  if (type === 'CREATE_JOINT') {
+    const { idA, idB, restLength, stiffness, damping, requestId } = { ...payload };
+    if (!world) {
+      pendingJoints.push({ idA, idB, restLength, stiffness, damping, requestId });
+    } else {
+      const id = createJoint(idA, idB, restLength, stiffness, damping);
+      self.postMessage({ type: 'JOINT_ID', requestId, id });
     }
   }
 
@@ -168,5 +214,25 @@ function createBody({ x, y, z, r, type = 'ball' }) {
 
   const id = nextId++;
   objects.push({ id, body: rigidBody, radius: r, type });
+  return id;
+}
+
+function createJoint(idA, idB, restLength = 5.0, stiffness = 50.0, damping = 2.0) {
+  const objA = objects.find((o) => o.id === idA);
+  const objB = objects.find((o) => o.id === idB);
+
+  if (!objA || !objB) {
+    console.warn(`createJoint: could not find bodies for ids ${idA}, ${idB}`);
+    return null;
+  }
+
+  const anchor1 = { x: 0.0, y: 0.0, z: 0.0 };
+  const anchor2 = { x: 0.0, y: 0.0, z: 0.0 };
+
+  const params = RAPIER.JointData.spring(restLength, stiffness, damping, anchor1, anchor2);
+  const impulseJoint = world.createImpulseJoint(params, objA.body, objB.body, true);
+
+  const id = nextJointId++;
+  relations.push({ id, idA, idB, restLength, stiffness, damping, joint: impulseJoint });
   return id;
 }
