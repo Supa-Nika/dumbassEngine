@@ -1,5 +1,5 @@
-import Scene from './drive/Scene.js';
-import Controls from './drive/Controls.js';
+import Scene from './engine/Scene.js';
+import Controls from './engine/Controls.js';
 import * as THREE from 'three';
 
 async function init() {
