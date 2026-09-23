@@ -5,7 +5,7 @@ export const MODELS = {
     baseSize: 3.0,
     halfExtents: { x: 1.0, y: 0.8, z: 2.2 },
   },
-  // truck: {
+  // truck: { // non existant
   //   obj: '/src/assets/Truck.obj',
   //   mtl: '/src/assets/Truck.mtl',
   //   baseSize: 3.0,
