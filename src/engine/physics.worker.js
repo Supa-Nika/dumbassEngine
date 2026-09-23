@@ -1,3 +1,4 @@
+import { MODELS, typeCodeFor } from './modelRegistry.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 
 let world = null;
@@ -89,7 +90,7 @@ function stepPhysics() {
 function sendTick() {
   const objectBuffer = new Float32Array(objects.length * STRIDE);
   for (let i = 0; i < objects.length; i++) {
-    const { body, radius, id, type } = objects[i];
+    const { body, radius, id, type, model } = objects[i];
     const pos = body.translation();
     const rot = body.rotation();
     const idx = i * STRIDE;
@@ -102,7 +103,7 @@ function sendTick() {
     objectBuffer[idx + 6] = rot.w;
     objectBuffer[idx + 7] = radius;
     objectBuffer[idx + 8] = id;
-    objectBuffer[idx + 9] = TYPE_CODE[type];
+    objectBuffer[idx + 9] = type === 'model' ? typeCodeFor(model) : 0;
   }
 
   const jointBuffer = new Float32Array(relations.length * JOINTSTRIDE);
@@ -185,6 +186,16 @@ self.onmessage = async (e) => {
     }
   }
 
+  if(type === 'CREATE_HTML'){
+    const spawn = { ...payload, type: 'html' };
+    if (!world) {
+      pendingSpawns.push(spawn);
+    } else {
+      const id = createBody(spawn);
+      self.postMessage({ type: 'OBJECT_ID', requestId: spawn.requestId, id });
+    }
+  }
+
   if (type === 'UPDATE_REPEL') {
     mousePos = payload.mousePos;
     repelRadius = payload.radius ?? repelRadius;
@@ -192,7 +203,7 @@ self.onmessage = async (e) => {
   }
 };
 
-function createBody({ x, y, z, r, type = 'ball' }) {
+function createBody({ x, y, z, r, type = 'ball', model = null }) {
   const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
     .setTranslation(x, y, z)
     .setCanSleep(false)
@@ -200,12 +211,14 @@ function createBody({ x, y, z, r, type = 'ball' }) {
 
   const rigidBody = world.createRigidBody(bodyDesc);
 
-  const scale = r / MODEL_BASE_SIZE;
-  const colliderDesc = type === 'model'
+  const def = type === 'model' ? MODELS[model] : null;
+  const scale = def ? r / def.baseSize : 1;
+
+  const colliderDesc = def
     ? RAPIER.ColliderDesc.cuboid(
-        MODEL_BASE_HALF_EXTENTS.x * scale,
-        MODEL_BASE_HALF_EXTENTS.y * scale,
-        MODEL_BASE_HALF_EXTENTS.z * scale
+        def.halfExtents.x * scale,
+        def.halfExtents.y * scale,
+        def.halfExtents.z * scale
       )
     : RAPIER.ColliderDesc.ball(r);
 
@@ -213,7 +226,7 @@ function createBody({ x, y, z, r, type = 'ball' }) {
   world.createCollider(colliderDesc, rigidBody);
 
   const id = nextId++;
-  objects.push({ id, body: rigidBody, radius: r, type });
+  objects.push({ id, body: rigidBody, radius: r, type, model });
   return id;
 }
 

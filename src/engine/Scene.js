@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
+import { MODELS, modelKeyFor } from './modelRegistry.js';
 import Controls from './Controls.js';
 
 // ModelAssets is a generic static asset loader — physics lives entirely in the worker.
@@ -84,8 +85,10 @@ export class ModelAssets {
       ModelAssets.#cache.set(key, loadingPromise);
     }
 
-    loadingPromise.then((template) => onLoad(template.clone()))
-      .catch(() => {}); // already logged above
+    loadingPromise.then(
+      (template) => onLoad(template.clone()),
+      () => {} // load failure, already logged above
+    );
   }
 }
 
@@ -246,6 +249,9 @@ class Scene {
   const seenModelIds = new Set();
   const seenBallIds = new Set();
 
+  
+  
+
   for (let i = 0; i < count; i++) {
     const o = i * STRIDE;
     const x = objectBuffer[o], y = objectBuffer[o + 1], z = objectBuffer[o + 2];
@@ -253,19 +259,21 @@ class Scene {
     const r = objectBuffer[o + 7];
     const id = objectBuffer[o + 8];
     const typeCode = objectBuffer[o + 9];
-    const isModel = typeCode === 1;
+    const isModel = typeCode > 0;
 
     if (isModel) {
       seenModelIds.add(id);
-      let entry = this.modelMeshes.get(id);
+      let entry = this.modelMeshes.get(id);   // `let`, since it's reassigned below
 
       if (!entry) {
         entry = { mesh: null };
-        this.modelMeshes.set(id, entry);
-        ModelAssets.load(MODEL_OBJ_PATH, MODEL_MTL_PATH, (object) => {
+        this.modelMeshes.set(id, entry);      // must be stored before the async load
+
+        const def = MODELS[modelKeyFor(typeCode)];
+        ModelAssets.load(def.obj, def.mtl, (object) => {
           entry.mesh = object;
-          object.userData.physicsId = id; // lets createJoint() accept this object directly
-          object.scale.setScalar(r / MODEL_BASE_SIZE);
+          object.userData.physicsId = id;
+          object.scale.setScalar(r / def.baseSize);
           this.scene.add(object);
 
           const resolve = this.pendingObjectResolvers.get(id);
@@ -391,12 +399,25 @@ class Scene {
     });
   }
 
-  createModel(x = 0, y = 5, z = 0, r = 3.0) {
+  createHTML(x = 0, y = 5, z = 0, r = 3.0){
     if (!this.worker) return Promise.resolve(null);
     const requestId = this.nextRequestId++;
     return new Promise((resolve) => {
       this.pendingModelRequests.set(requestId, resolve);
-      this.worker.postMessage({ type: 'CREATE_MODEL', payload: { x, y, z, r, requestId } });
+      this.worker.postMessage({ type: 'CREATE_HTML', payload: { x, y, z, r, requestId } });
+    });
+  }
+
+  createModel(x = 0, y = 5, z = 0, r = 3.0, model = 'car') {
+    if (!this.worker) return Promise.resolve(null);
+    if (!MODELS[model]) {
+      console.warn(`createModel: unknown model "${model}"`);
+      return Promise.resolve(null);
+    }
+    const requestId = this.nextRequestId++;
+    return new Promise((resolve) => {
+      this.pendingModelRequests.set(requestId, resolve);
+      this.worker.postMessage({ type: 'CREATE_MODEL', payload: { x, y, z, r, model, requestId } });
     });
   }
 
