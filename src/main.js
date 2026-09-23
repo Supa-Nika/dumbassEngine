@@ -12,7 +12,7 @@ async function init() {
     // Scene.setCameraFollowTarget(object);
   });
 
-  window.addEventListener('click', async (e) => {
+  window.addEventListener('wheel', async (e) => {
     e.preventDefault();
     const mousePos = Controls.getMouseWorldPosition(Scene.camera);
     const r = THREE.MathUtils.randFloat(1, 5);
@@ -20,10 +20,15 @@ async function init() {
     // Scene.setCameraFollowTarget(ball);
   });
 
+  window.addEventListener('click', () => {
+    Scene.toggleRepel();
+  });
+
   const ball = await Scene.createBall(0, 5, 0, 10);
   const object = await Scene.createModel(5, 5, 5, 3);
   Scene.setCameraFollowTarget(object);
   Scene.createJoint(ball, object, 10, 100, 10);
+  
 }
 
 init();

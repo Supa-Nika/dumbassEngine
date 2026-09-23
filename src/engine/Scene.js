@@ -111,6 +111,8 @@ class Scene {
   jointLines = new Map();             // "idA_idB" -> THREE.Line
   nextRequestId = 0;
 
+  enableRepel = false;
+
   async createScene() {
     if (this.#initialized) return;
     this.#initialized = true;
@@ -200,12 +202,19 @@ class Scene {
     const animate = () => {
       requestAnimationFrame(animate);
 
-      Controls.sendRepelUpdate(this.camera, 5.0, 10.0);
+      if(this.enableRepel) {
+        Controls.sendRepelUpdate(this.camera, 5.0, 10.0)
+      };
+
       this.updateCamera();
 
       renderer.render(this.scene, this.camera);
     };
     animate();
+  }
+
+  toggleRepel(){
+    this.enableRepel = !this.enableRepel;
   }
 
   setCameraFollowTarget(object) {

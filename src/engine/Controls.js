@@ -30,14 +30,14 @@ class Controls {
 
     const mouseWorldPos = Controls.getMouseWorldPosition(camera);
 
-    // Controls.worker.postMessage({
-    //   type: 'UPDATE_REPEL',
-    //   payload: {
-    //     mousePos: { x: mouseWorldPos.x, z: mouseWorldPos.z },
-    //     radius,
-    //     strength
-    //   }
-    // });
+    Controls.worker.postMessage({
+      type: 'UPDATE_REPEL',
+      payload: {
+        mousePos: { x: mouseWorldPos.x, z: mouseWorldPos.z },
+        radius,
+        strength
+      }
+    });
   }
 
   static mainCarInput() {
