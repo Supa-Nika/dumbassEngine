@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
-import { MODELS, modelKeyFor } from './modelRegistry.js';
+import { CSS3DRenderer, CSS3DObject } from 'three/addons/renderers/CSS3DRenderer.js';
+import { MODELS, modelKeyFor, HTML_TYPE_CODE } from './modelRegistry.js';
 import Controls from './Controls.js';
 
-// ModelAssets is a generic static asset loader — physics lives entirely in the worker.
 
 class TextureAssets {
   static #cache = new Map();
@@ -42,13 +42,6 @@ class TextureAssets {
     return promise;
   }
 }
-
-const MODEL_OBJ_PATH = '/src/assets/Car.obj';
-const MODEL_MTL_PATH = '/src/assets/Car.mtl';
-
-// Must match MODEL_BASE_SIZE in physics.worker.js — this is the `r` value at which
-// the model's hitbox is exactly MODEL_BASE_HALF_EXTENTS, i.e. "no scaling applied".
-const MODEL_BASE_SIZE = 3.0;
 
 export class ModelAssets {
   static #cache = new Map();
@@ -113,8 +106,8 @@ class Scene {
   ballProxies = new Map();            // objectId -> Object3D (position/quat mirror)
   jointLines = new Map();             // "idA_idB" -> THREE.Line
   nextRequestId = 0;
-
-  enableRepel = false;
+  htmlBlocks = new Map();          // objectId -> { group, mesh, css }
+  pendingHtmlRequests = new Map(); // requestId -> { resolve, spec }
 
   async createScene() {
     if (this.#initialized) return;
@@ -126,9 +119,27 @@ class Scene {
     this.camera.lookAt(0, 0, 0);
     
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setClearColor(0x000000, 0);
     renderer.setSize(window.innerWidth, window.innerHeight);
-    document.body.appendChild(renderer.domElement);
+    renderer.domElement.style.pointerEvents = 'none';
+
+    const cssRenderer = new CSS3DRenderer();
+    cssRenderer.setSize(window.innerWidth, window.innerHeight);
+    cssRenderer.domElement.id = 'css3d';
+
+    for (const el of [cssRenderer.domElement, renderer.domElement]) {
+      Object.assign(el.style, { position: 'absolute', top: '0', left: '0' });
+    }
+    document.body.style.background = '#000';           // sky is now transparent
+    document.body.appendChild(cssRenderer.domElement);  // behind
+    document.body.appendChild(renderer.domElement);     // in front
+
+    // shared materials for html blocks
+    this.htmlHoleMaterial = new THREE.MeshBasicMaterial({
+      color: 0x000000, opacity: 0, blending: THREE.NoBlending, // punches a transparent hole in the canvas
+    });
+    this.htmlSolidMaterial = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.6 });
 
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
     const light = new THREE.PointLight(0xffffff, 50, 100);
@@ -158,6 +169,7 @@ class Scene {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      cssRenderer.setSize(window.innerWidth, window.innerHeight);
     });
 
     this.worker = new Worker(new URL('./physics.worker.js', import.meta.url), { type: 'module' });
@@ -189,6 +201,18 @@ class Scene {
           this.ballProxies.set(id, proxy);
           resolve(proxy); // transform fills in on the next tick
         }
+
+        if (this.pendingHtmlRequests.has(requestId)) {
+          const { resolve, spec } = this.pendingHtmlRequests.get(requestId);
+          this.pendingHtmlRequests.delete(requestId);
+
+          const block = this.buildHtmlBlock(spec);
+          block.group.position.set(spec.x, spec.y, spec.z);
+          block.group.userData.physicsId = id;   // createJoint() accepts this directly
+          this.scene.add(block.group);
+          this.htmlBlocks.set(id, block);
+          resolve(block.group);
+        }
       }
 
       if (type === 'JOINT_ID') {
@@ -200,24 +224,17 @@ class Scene {
       }
     };
 
-    
-
     const animate = () => {
       requestAnimationFrame(animate);
 
-      if(this.enableRepel) {
-        Controls.sendRepelUpdate(this.camera, 5.0, 10.0)
-      };
+      Controls.sendGrabUpdate(this.camera);
 
       this.updateCamera();
 
       renderer.render(this.scene, this.camera);
+      cssRenderer.render(this.scene, this.camera);
     };
     animate();
-  }
-
-  toggleRepel(){
-    this.enableRepel = !this.enableRepel;
   }
 
   setCameraFollowTarget(object) {
@@ -242,103 +259,127 @@ class Scene {
   }
 
   updateMeshFromBuffer(objectBuffer, jointBuffer) {
-  const STRIDE = this.STRIDE;
-  const count = objectBuffer.length / STRIDE;
+    const STRIDE = this.STRIDE;
+    const count = objectBuffer.length / STRIDE;
 
-  let ballIndex = 0;
-  const seenModelIds = new Set();
-  const seenBallIds = new Set();
+    let ballIndex = 0;
+    const seenModelIds = new Set();
+    const seenBallIds = new Set();
+    const seenHtmlIds = new Set();
 
   
   
 
-  for (let i = 0; i < count; i++) {
-    const o = i * STRIDE;
-    const x = objectBuffer[o], y = objectBuffer[o + 1], z = objectBuffer[o + 2];
-    const qx = objectBuffer[o + 3], qy = objectBuffer[o + 4], qz = objectBuffer[o + 5], qw = objectBuffer[o + 6];
-    const r = objectBuffer[o + 7];
-    const id = objectBuffer[o + 8];
-    const typeCode = objectBuffer[o + 9];
-    const isModel = typeCode > 0;
+    for (let i = 0; i < count; i++) {
+      const o = i * STRIDE;
+      const x = objectBuffer[o], y = objectBuffer[o + 1], z = objectBuffer[o + 2];
+      const qx = objectBuffer[o + 3], qy = objectBuffer[o + 4], qz = objectBuffer[o + 5], qw = objectBuffer[o + 6];
+      const r = objectBuffer[o + 7];
+      const id = objectBuffer[o + 8];
+      const typeCode = objectBuffer[o + 9];
+      const isModel = typeCode > 0;
+      const isHtml = typeCode === HTML_TYPE_CODE;
 
-    if (isModel) {
-      seenModelIds.add(id);
-      let entry = this.modelMeshes.get(id);   // `let`, since it's reassigned below
+      if (isHtml) {
+        seenHtmlIds.add(id);
+        const block = this.htmlBlocks.get(id);
+        if (block) {
+          block.group.position.set(x, y, z);
+          block.group.quaternion.set(qx, qy, qz, qw);
+        }
+      } else {
+        if (isModel) {
+          seenModelIds.add(id);
+          let entry = this.modelMeshes.get(id);
 
-      if (!entry) {
-        entry = { mesh: null };
-        this.modelMeshes.set(id, entry);      // must be stored before the async load
+          if (!entry) {
+            entry = { mesh: null };
+            this.modelMeshes.set(id, entry);
 
-        const def = MODELS[modelKeyFor(typeCode)];
-        ModelAssets.load(def.obj, def.mtl, (object) => {
-          entry.mesh = object;
-          object.userData.physicsId = id;
-          object.scale.setScalar(r / def.baseSize);
-          this.scene.add(object);
+            const def = MODELS[modelKeyFor(typeCode)];
+            ModelAssets.load(def.obj, def.mtl, (object) => {
+              entry.mesh = object;
+              object.userData.physicsId = id;
+              object.scale.setScalar(r / def.baseSize);
+              this.scene.add(object);
 
-          const resolve = this.pendingObjectResolvers.get(id);
-          if (resolve) {
-            this.pendingObjectResolvers.delete(id);
-            resolve(object);
+              const resolve = this.pendingObjectResolvers.get(id);
+              if (resolve) {
+                this.pendingObjectResolvers.delete(id);
+                resolve(object);
+              }
+            });
           }
-        });
-      }
 
-      if (entry.mesh) {
-        entry.mesh.position.set(x, y, z);
-        entry.mesh.quaternion.set(qx, qy, qz, qw);
-      }
-    } else {
-      seenBallIds.add(id);
-
-      this.dummy.position.set(x, y, z);
-      this.dummy.quaternion.set(qx, qy, qz, qw);
-      this.dummy.scale.setScalar(r / this.baseRadius);
-      this.dummy.updateMatrix();
-      this.instancedMesh.setMatrixAt(ballIndex, this.dummy.matrix);
-      ballIndex++;
-
-      const proxy = this.ballProxies.get(id);
-      if (proxy) {
-        proxy.position.set(x, y, z);
-        proxy.quaternion.set(qx, qy, qz, qw);
-      }
-    }
-  }
-
-  this.instancedMesh.count = ballIndex;
-  this.instancedMesh.instanceMatrix.needsUpdate = true;
-
-  for (const [id, entry] of this.modelMeshes) {
-    if (!seenModelIds.has(id)) {
-      if (entry.mesh) {
-        this.scene.remove(entry.mesh);
-        entry.mesh.traverse((child) => {
-          if (child.isMesh) {
-            child.geometry.dispose();
-            (Array.isArray(child.material) ? child.material : [child.material])
-              .forEach((m) => m.dispose());
+          if (entry.mesh) {
+            entry.mesh.position.set(x, y, z);
+            entry.mesh.quaternion.set(qx, qy, qz, qw);
           }
-        });
+        } else {
+          seenBallIds.add(id);
+
+          this.dummy.position.set(x, y, z);
+          this.dummy.quaternion.set(qx, qy, qz, qw);
+          this.dummy.scale.setScalar(r / this.baseRadius);
+          this.dummy.updateMatrix();
+          this.instancedMesh.setMatrixAt(ballIndex, this.dummy.matrix);
+          ballIndex++;
+
+          const proxy = this.ballProxies.get(id);
+          if (proxy) {
+            proxy.position.set(x, y, z);
+            proxy.quaternion.set(qx, qy, qz, qw);
+          }
+        }
       }
-      this.modelMeshes.delete(id);
-      if (entry.mesh === this.followTarget) this.followTarget = null;
     }
-  }
 
-  for (const [id, proxy] of this.ballProxies) {
-    if (!seenBallIds.has(id)) {
-      this.ballProxies.delete(id);
-      if (proxy === this.followTarget) this.followTarget = null;
+    this.instancedMesh.count = ballIndex;
+    this.instancedMesh.instanceMatrix.needsUpdate = true;
+
+    for (const [id, entry] of this.modelMeshes) {
+      if (!seenModelIds.has(id)) {
+        if (entry.mesh) {
+          this.scene.remove(entry.mesh);
+          entry.mesh.traverse((child) => {
+            if (child.isMesh) {
+              child.geometry.dispose();
+              (Array.isArray(child.material) ? child.material : [child.material])
+                .forEach((m) => m.dispose());
+            }
+          });
+        }
+        this.modelMeshes.delete(id);
+        if (entry.mesh === this.followTarget) this.followTarget = null;
+      }
     }
-  }
 
-  this.updateJointLines(jointBuffer);
-}
+    for (const [id, block] of this.htmlBlocks) {
+      if (!seenHtmlIds.has(id)) {
+        block.css.element.remove();          // CSS3DRenderer won't detach the iframe for you here
+        this.scene.remove(block.group);
+        block.mesh.geometry.dispose();       // shared materials stay
+        this.htmlBlocks.delete(id);
+        if (block.group === this.followTarget) this.followTarget = null;
+      }
+    }
+
+    for (const [id, proxy] of this.ballProxies) {
+      if (!seenBallIds.has(id)) {
+        this.ballProxies.delete(id);
+        if (proxy === this.followTarget) this.followTarget = null;
+      }
+    }
+
+    this.updateJointLines(jointBuffer);
+  }
 
   getObjectPosition(id) {
     const modelEntry = this.modelMeshes.get(id);
     if (modelEntry && modelEntry.mesh) return modelEntry.mesh.position;
+
+    const block = this.htmlBlocks.get(id);
+    if (block) return block.group.position;
 
     const proxy = this.ballProxies.get(id);
     if (proxy) return proxy.position;
@@ -399,13 +440,46 @@ class Scene {
     });
   }
 
-  createHTML(x = 0, y = 5, z = 0, r = 3.0){
+  createHTML(x = 0, y = 5, z = 0, r = 1.0, path, { width = 16, height = 9, pixelWidth = 1024 } = {}) {
     if (!this.worker) return Promise.resolve(null);
+    if (!path) {
+      console.warn('createHTML: path is required');
+      return Promise.resolve(null);
+    }
     const requestId = this.nextRequestId++;
     return new Promise((resolve) => {
-      this.pendingModelRequests.set(requestId, resolve);
-      this.worker.postMessage({ type: 'CREATE_HTML', payload: { x, y, z, r, requestId } });
+      this.pendingHtmlRequests.set(requestId, {
+        resolve,
+        spec: { x, y, z, depth: r, path, width, height, pixelWidth },
+      });
+      this.worker.postMessage({ type: 'CREATE_HTML', payload: { x, y, z, r, width, height, requestId } });
     });
+  }
+
+  buildHtmlBlock({ path, width, height, depth, pixelWidth }) {
+    const pixelHeight = Math.round(pixelWidth * height / width);
+
+    const iframe = document.createElement('iframe');
+    iframe.src = path;
+    iframe.style.width = `${pixelWidth}px`;
+    iframe.style.height = `${pixelHeight}px`;
+    iframe.style.border = '0';
+    iframe.style.background = '#fff';
+
+    const css = new CSS3DObject(iframe);
+    css.scale.setScalar(width / pixelWidth);   // css px -> world units
+    css.position.z = depth / 2 + 0.01;         // sit on the front (+z) face
+
+    // BoxGeometry face order: +x, -x, +y, -y, +z, -z. Only +z is the "window".
+    const solid = this.htmlSolidMaterial;
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(width, height, depth),
+      [solid, solid, solid, solid, this.htmlHoleMaterial, solid]
+    );
+
+    const group = new THREE.Group();
+    group.add(mesh, css);
+    return { group, mesh, css };
   }
 
   createModel(x = 0, y = 5, z = 0, r = 3.0, model = 'car') {
@@ -438,6 +512,20 @@ class Scene {
       this.worker.postMessage({ type: 'CREATE_JOINT', payload: { idA, idB, restLength, stiffness, damping, requestId } });
     });
   }
+
+  setAnchored(obj, anchored) {
+    if (!this.worker) return false;
+    const id = typeof obj === 'number' ? obj : obj?.userData?.physicsId;
+    if (id == null) {
+      console.warn('anchor: could not resolve a physics id', obj);
+      return false;
+    }
+    this.worker.postMessage({ type: 'SET_ANCHOR', payload: { id, anchored } });
+    return true;
+  }
+
+  anchor(obj)   { return this.setAnchored(obj, true); }
+  unanchor(obj) { return this.setAnchored(obj, false); }
 }
 
 export default new Scene();

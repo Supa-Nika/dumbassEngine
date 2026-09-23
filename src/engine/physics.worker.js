@@ -1,4 +1,4 @@
-import { MODELS, typeCodeFor } from './modelRegistry.js';
+import { MODELS, typeCodeFor, HTML_TYPE_CODE } from './modelRegistry.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 
 let world = null;
@@ -18,9 +18,16 @@ const pendingSpawns = [];
 
 const pendingJoints = [];
 
+
+
 let mousePos = null;
-let repelRadius = 5;
-let repelStrength = 10;
+
+
+const GRAB_K = 600;                    // stiffness: the snap knob
+const GRAB_C = 2 * Math.sqrt(GRAB_K);  // critical damping
+
+let grab = null;     // { obj, planeY, offset }
+let grabRay = null;
 
 const FIXED_DT = 1 / 120;        // seconds of sim time consumed per physics step
 const TIME_SCALE = 2.0;
@@ -54,30 +61,75 @@ function tick() {
   if (steps > 0) sendTick();
 }
 
-function stepPhysics() {
-  if (mousePos) {
-    for (const obj of objects) {
-      const pos = obj.body.translation();
-      const dx = pos.x - mousePos.x;
-      const dz = pos.z - mousePos.z;
-      const dist = Math.sqrt(dx * dx + dz * dz);
 
-      if (dist < repelRadius && dist > 0.001) {
-        const force = (1 - dist / repelRadius) * repelStrength;
-        obj.body.applyImpulse({ x: (dx / dist) * force, y: 0, z: (dz / dist) * force }, true);
-      }
-    }
-  }
+
+function updateGrab({ origin, dir, down }) {
+  grabRay = { origin, dir };
+  if (!down) return releaseGrab();
+  if (grab) return;
+
+  const hit = world.castRay(
+    new RAPIER.Ray(origin, dir), 1000, true, RAPIER.QueryFilterFlags.EXCLUDE_FIXED
+  );
+  if (!hit) return;
+
+  const body = hit.collider.parent();
+  const obj = objects.find((o) => o.body.handle === body.handle);
+  if (!obj) return;
+
+  const t = hit.timeOfImpact ?? hit.toi; // name differs between rapier versions
+  const pt = { x: origin.x + dir.x * t, y: origin.y + dir.y * t, z: origin.z + dir.z * t };
+  const c = body.translation();
+
+  // remember where on the object we grabbed so it doesn't jump to the cursor
+  grab = { obj, planeY: pt.y, offset: { x: pt.x - c.x, y: pt.y - c.y, z: pt.z - c.z } };
+  body.setGravityScale(0, true);
+  body.setAngularDamping(5);
+}
+
+function releaseGrab() {
+  if (!grab) return;
+  grab.obj.body.setGravityScale(1, true);
+  grab.obj.body.setAngularDamping(0);
+  grab = null; // linear velocity is kept, so you can fling things
+}
+
+function applyGrab() {
+  if (!grab || !grabRay) return;
+  const { origin, dir } = grabRay;
+  if (Math.abs(dir.y) < 1e-4) return;
+
+  // cursor ray -> point on the horizontal drag plane
+  const t = (grab.planeY - origin.y) / dir.y;
+  if (t <= 0) return;
+
+  const body = grab.obj.body;
+  const p = body.translation();
+  const v = body.linvel();
+  const m = body.mass();
+
+  const ax = GRAB_K * (origin.x + dir.x * t - grab.offset.x - p.x) - GRAB_C * v.x;
+  const ay = GRAB_K * (origin.y + dir.y * t - grab.offset.y - p.y) - GRAB_C * v.y;
+  const az = GRAB_K * (origin.z + dir.z * t - grab.offset.z - p.z) - GRAB_C * v.z;
+
+  // multiplying by mass makes a ball and a car respond identically
+  body.applyImpulse({ x: m * ax * FIXED_DT, y: m * ay * FIXED_DT, z: m * az * FIXED_DT }, true);
+}
+
+function stepPhysics() {
+  applyGrab();
 
   world.step();
 
   for (let i = objects.length - 1; i >= 0; i--) {
     if (objects[i].body.translation().y < -50) {
       const removedId = objects[i].id;
-      world.removeRigidBody(objects[i].body); // Rapier also drops any impulse joints on this body
+
+      if (grab?.obj.id === removedId) grab = null; // must happen before the body is removed
+
+      world.removeRigidBody(objects[i].body);
       objects.splice(i, 1);
 
-      // Keep our bookkeeping in sync so we stop reporting dead joints to the main thread.
       for (let j = relations.length - 1; j >= 0; j--) {
         if (relations[j].idA === removedId || relations[j].idB === removedId) {
           relations.splice(j, 1);
@@ -103,7 +155,9 @@ function sendTick() {
     objectBuffer[idx + 6] = rot.w;
     objectBuffer[idx + 7] = radius;
     objectBuffer[idx + 8] = id;
-    objectBuffer[idx + 9] = type === 'model' ? typeCodeFor(model) : 0;
+    objectBuffer[idx + 9] =
+      type === 'html'  ? HTML_TYPE_CODE :
+      type === 'model' ? typeCodeFor(model) : 0; // i really wanted to nest these fuckers
   }
 
   const jointBuffer = new Float32Array(relations.length * JOINTSTRIDE);
@@ -196,14 +250,15 @@ self.onmessage = async (e) => {
     }
   }
 
-  if (type === 'UPDATE_REPEL') {
-    mousePos = payload.mousePos;
-    repelRadius = payload.radius ?? repelRadius;
-    repelStrength = payload.strength ?? repelStrength;
+  if (type === 'SET_ANCHOR' && world) {
+    const obj = objects.find((o) => o.id === payload.id);
+    if (obj) setAnchored(obj, payload.anchored);
   }
+
+  if (type === 'UPDATE_GRAB' && world) updateGrab(payload);
 };
 
-function createBody({ x, y, z, r, type = 'ball', model = null }) {
+function createBody({ x, y, z, r, width = 16, height = 9, type = 'ball', model = null }) {
   const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
     .setTranslation(x, y, z)
     .setCanSleep(false)
@@ -211,16 +266,19 @@ function createBody({ x, y, z, r, type = 'ball', model = null }) {
 
   const rigidBody = world.createRigidBody(bodyDesc);
 
-  const def = type === 'model' ? MODELS[model] : null;
-  const scale = def ? r / def.baseSize : 1;
-
-  const colliderDesc = def
-    ? RAPIER.ColliderDesc.cuboid(
-        def.halfExtents.x * scale,
-        def.halfExtents.y * scale,
-        def.halfExtents.z * scale
-      )
-    : RAPIER.ColliderDesc.ball(r);
+  let colliderDesc;
+  if (type === 'html') {
+    // r = full depth (thickness) of the slab
+    colliderDesc = RAPIER.ColliderDesc.cuboid(width / 2, height / 2, r / 2);
+  } else if (type === 'model') {
+    const def = MODELS[model];
+    const s = r / def.baseSize;
+    colliderDesc = RAPIER.ColliderDesc.cuboid(
+      def.halfExtents.x * s, def.halfExtents.y * s, def.halfExtents.z * s
+    );
+  } else {
+    colliderDesc = RAPIER.ColliderDesc.ball(r);
+  }
 
   colliderDesc.setRestitution(0.8).setFriction(0.2);
   world.createCollider(colliderDesc, rigidBody);
@@ -248,4 +306,18 @@ function createJoint(idA, idB, restLength = 5.0, stiffness = 50.0, damping = 2.0
   const id = nextJointId++;
   relations.push({ id, idA, idB, restLength, stiffness, damping, joint: impulseJoint });
   return id;
+}
+
+function setAnchored(obj, anchored) {
+  const body = obj.body;
+
+  if (grab?.obj === obj) releaseGrab(); // let go first, a frozen body can't be dragged
+
+  if (anchored) {
+    body.setLinvel({ x: 0, y: 0, z: 0 }, true); // freeze it dead, not mid-drift
+    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    body.setBodyType(RAPIER.RigidBodyType.Fixed, true);
+  } else {
+    body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+  }
 }

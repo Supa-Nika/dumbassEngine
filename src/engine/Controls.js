@@ -24,22 +24,6 @@ class Controls {
     return Controls.worldPosition;
   }
 
-  // Updated signature: receives camera directly since worker is stored in Controls.worker
-  static sendRepelUpdate(camera, radius = 5.0, strength = 1.5) {
-    if (!Controls.worker) return;
-
-    const mouseWorldPos = Controls.getMouseWorldPosition(camera);
-
-    Controls.worker.postMessage({
-      type: 'UPDATE_REPEL',
-      payload: {
-        mousePos: { x: mouseWorldPos.x, z: mouseWorldPos.z },
-        radius,
-        strength
-      }
-    });
-  }
-
   static mainCarInput() {
     if (!Controls.worker) return;
 
@@ -47,6 +31,22 @@ class Controls {
     Controls.worker.postMessage({
       type: 'UPDATE_MAIN_CAR',
       payload: { keys: { ...keys } }
+    });
+  }
+
+  static down = false;
+
+  static sendGrabUpdate(camera) {
+    if (!Controls.worker) return;
+    Controls.raycaster.setFromCamera(Controls.mouse, camera);
+    const { origin, direction } = Controls.raycaster.ray;
+    Controls.worker.postMessage({
+      type: 'UPDATE_GRAB',
+      payload: {
+        origin: { x: origin.x, y: origin.y, z: origin.z },
+        dir: { x: direction.x, y: direction.y, z: direction.z },
+        down: Controls.down,
+      },
     });
   }
 }
@@ -69,5 +69,11 @@ window.addEventListener('keyup', (event) => {
     Controls.mainCarInput();
   }
 });
+
+// with your other listeners
+window.addEventListener('pointerdown', () => { Controls.down = true; });
+window.addEventListener('pointerup', () => { Controls.down = false; });
+window.addEventListener('pointercancel', () => { Controls.down = false; });
+window.addEventListener('blur', () => { Controls.down = false; });
 
 export default Controls;

@@ -19,18 +19,27 @@ async function init() {
     const r = THREE.MathUtils.randFloat(1, 5);
     const ball = await Scene.createBall(mousePos.x, 5, mousePos.z, r);
     // Scene.setCameraFollowTarget(ball);
-  });
-
-  window.addEventListener('click', () => {
-    Scene.toggleRepel();
-  });
-  
+  });  
 
   const ball = await Scene.createBall(0, 5, 0, 3);
   const object = await Scene.createModel(5, 5, 5, 3, 'car');
-  Scene.setCameraFollowTarget(object);
+
+  // Scene.setCameraFollowTarget(object);
   Scene.createJoint(ball, object, 10, 100, 10);
+
+  // const page = await Scene.createHTML(0, 25, 10, 10, '/src/assets/demo.html', { width: 96 , height: 54 });
+
+  // Scene.anchor(page);
+
+  Scene.anchor( object);
+  // Scene.setCameraFollowTarget(page);
+
+  // for (let index = 0; index < 10000; index++) {
+  //   const ball = await Scene.createBall(Math.random(), 5, Math.random());
+  // }
+
   
+  // const page2 = await Scene.createHTML(0, 10, 10, 5, 'slopthrowsmainidkWhy.html', { width: 200, height: 50 });
 }
 
 init();
