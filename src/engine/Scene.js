@@ -96,8 +96,10 @@ class Scene {
   maxCount = 10000;
   baseRadius = 3.0;
   STRIDE = 10;
-  JOINTSTRIDE = 5;
-  modelMeshes = new Map();
+  JOINTSTRIDE = 11;
+  _pA = new THREE.Vector3();
+  _pB = new THREE.Vector3();
+  modelMeshes = new Map(); 
   followTarget = null; // any THREE.Object3D the camera should follow — see setCameraFollowTarget()
   pendingModelRequests = new Map();
   pendingBallRequests = new Map();
@@ -374,6 +376,17 @@ class Scene {
     this.updateJointLines(jointBuffer);
   }
 
+  getObject3D(id) {
+    return this.modelMeshes.get(id)?.mesh
+        ?? this.htmlBlocks.get(id)?.group
+        ?? this.ballProxies.get(id)
+        ?? null;
+  }
+
+  getObjectPosition(id) {
+    return this.getObject3D(id)?.position ?? null;
+  }
+
   getObjectPosition(id) {
     const modelEntry = this.modelMeshes.get(id);
     if (modelEntry && modelEntry.mesh) return modelEntry.mesh.position;
@@ -396,27 +409,31 @@ class Scene {
 
     for (let i = 0; i < count; i++) {
       const o = i * STRIDE;
-      const idA = jointBuffer[o];
-      const idB = jointBuffer[o + 1];
-      const key = `${idA}_${idB}`;
+      const objA = this.getObject3D(jointBuffer[o]);
+      const objB = this.getObject3D(jointBuffer[o + 1]);
+      if (!objA || !objB) continue; // meshes haven't loaded yet
 
-      const posA = this.getObjectPosition(idA);
-      const posB = this.getObjectPosition(idB);
-      if (!posA || !posB) continue; // meshes haven't loaded yet (e.g. a model still fetching)
+      // local anchor -> world: rotate by the body's orientation, then offset by its position
+      this._pA.set(jointBuffer[o + 5], jointBuffer[o + 6], jointBuffer[o + 7])
+        .applyQuaternion(objA.quaternion).add(objA.position);
+      this._pB.set(jointBuffer[o + 8], jointBuffer[o + 9], jointBuffer[o + 10])
+        .applyQuaternion(objB.quaternion).add(objB.position);
 
+      const key = i;
       seenKeys.add(key);
 
       let line = this.jointLines.get(key);
       if (!line) {
-        const geometry = new THREE.BufferGeometry().setFromPoints([posA, posB]);
+        const geometry = new THREE.BufferGeometry().setFromPoints([this._pA, this._pB]);
         const material = new THREE.LineBasicMaterial({ color: 0xffaa00 });
         line = new THREE.Line(geometry, material);
+        line.frustumCulled = false;
         this.scene.add(line);
         this.jointLines.set(key, line);
       } else {
         const positions = line.geometry.attributes.position;
-        positions.setXYZ(0, posA.x, posA.y, posA.z);
-        positions.setXYZ(1, posB.x, posB.y, posB.z);
+        positions.setXYZ(0, this._pA.x, this._pA.y, this._pA.z);
+        positions.setXYZ(1, this._pB.x, this._pB.y, this._pB.z);
         positions.needsUpdate = true;
       }
     }
@@ -495,7 +512,7 @@ class Scene {
     });
   }
 
-  createJoint(objA, objB, restLength = 3, stiffness = 3, damping = 3) {
+  createJoint(objA, objB, restLength = 3, stiffness = 3, damping = 3, { anchorA = null, anchorB = null } = {}) {
     if (!this.worker) return Promise.resolve(null);
 
     const idA = typeof objA === 'number' ? objA : objA?.userData?.physicsId;
@@ -509,7 +526,10 @@ class Scene {
     const requestId = this.nextRequestId++;
     return new Promise((resolve) => {
       this.pendingJointRequests.set(requestId, resolve);
-      this.worker.postMessage({ type: 'CREATE_JOINT', payload: { idA, idB, restLength, stiffness, damping, requestId } });
+      this.worker.postMessage({
+        type: 'CREATE_JOINT',
+        payload: { idA, idB, restLength, stiffness, damping, anchorA, anchorB, requestId },
+      });
     });
   }
 

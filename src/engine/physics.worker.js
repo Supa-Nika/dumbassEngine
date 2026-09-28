@@ -33,7 +33,7 @@ const FIXED_DT = 1 / 120;        // seconds of sim time consumed per physics ste
 const TIME_SCALE = 2.0;
 const MAX_STEPS_PER_TICK = 5;
 const STRIDE = 10; // x,y,z, qx,qy,qz,qw, r, id, typeCode
-const JOINTSTRIDE = 5; // idA, idB, restLength, stiffness, damping
+const JOINTSTRIDE = 11; // idA, idB, restLength, stiffness, damping, anchorA xyz, anchorB xyz
 
 let lastTime = null;
 let accumulator = 0;
@@ -162,13 +162,19 @@ function sendTick() {
 
   const jointBuffer = new Float32Array(relations.length * JOINTSTRIDE);
   for (let i = 0; i < relations.length; i++) {
-    const { idA, idB, restLength, stiffness, damping } = relations[i];
+    const { idA, idB, restLength, stiffness, damping, anchorA, anchorB } = relations[i];
     const idx = i * JOINTSTRIDE;
-    jointBuffer[idx] = idA;
+    jointBuffer[idx]     = idA;
     jointBuffer[idx + 1] = idB;
     jointBuffer[idx + 2] = restLength ?? 3;
     jointBuffer[idx + 3] = stiffness ?? 3;
     jointBuffer[idx + 4] = damping ?? 3;
+    jointBuffer[idx + 5] = anchorA.x;
+    jointBuffer[idx + 6] = anchorA.y;
+    jointBuffer[idx + 7] = anchorA.z;
+    jointBuffer[idx + 8] = anchorB.x;
+    jointBuffer[idx + 9] = anchorB.y;
+    jointBuffer[idx + 10] = anchorB.z;
   }
 
   self.postMessage(
@@ -202,7 +208,10 @@ self.onmessage = async (e) => {
     // Bodies now exist, so any joints that were requested before INIT can be resolved.
     while (pendingJoints.length > 0) {
       const joint = pendingJoints.shift();
-      const id = createJoint(joint.idA, joint.idB, joint.restLength, joint.stiffness, joint.damping);
+      const id = createJoint(
+        joint.idA, joint.idB, joint.restLength, joint.stiffness, joint.damping,
+        joint.anchorA, joint.anchorB
+      );
       self.postMessage({ type: 'JOINT_ID', requestId: joint.requestId, id });
     }
 
@@ -231,11 +240,11 @@ self.onmessage = async (e) => {
   }
 
   if (type === 'CREATE_JOINT') {
-    const { idA, idB, restLength, stiffness, damping, requestId } = { ...payload };
+    const { idA, idB, restLength, stiffness, damping, anchorA, anchorB, requestId } = payload;
     if (!world) {
-      pendingJoints.push({ idA, idB, restLength, stiffness, damping, requestId });
+      pendingJoints.push({ idA, idB, restLength, stiffness, damping, anchorA, anchorB, requestId });
     } else {
-      const id = createJoint(idA, idB, restLength, stiffness, damping);
+      const id = createJoint(idA, idB, restLength, stiffness, damping, anchorA, anchorB);
       self.postMessage({ type: 'JOINT_ID', requestId, id });
     }
   }
@@ -288,7 +297,9 @@ function createBody({ x, y, z, r, width = 16, height = 9, type = 'ball', model =
   return id;
 }
 
-function createJoint(idA, idB, restLength = 5.0, stiffness = 50.0, damping = 2.0) {
+const toVec = (v) => ({ x: v?.x ?? 0, y: v?.y ?? 0, z: v?.z ?? 0 }); // missing = center
+
+function createJoint(idA, idB, restLength = 5.0, stiffness = 50.0, damping = 2.0, anchorA, anchorB) {
   const objA = objects.find((o) => o.id === idA);
   const objB = objects.find((o) => o.id === idB);
 
@@ -297,14 +308,17 @@ function createJoint(idA, idB, restLength = 5.0, stiffness = 50.0, damping = 2.0
     return null;
   }
 
-  const anchor1 = { x: 0.0, y: 0.0, z: 0.0 };
-  const anchor2 = { x: 0.0, y: 0.0, z: 0.0 };
+  const anchor1 = toVec(anchorA);
+  const anchor2 = toVec(anchorB);
 
   const params = RAPIER.JointData.spring(restLength, stiffness, damping, anchor1, anchor2);
   const impulseJoint = world.createImpulseJoint(params, objA.body, objB.body, true);
 
   const id = nextJointId++;
-  relations.push({ id, idA, idB, restLength, stiffness, damping, joint: impulseJoint });
+  relations.push({
+    id, idA, idB, restLength, stiffness, damping,
+    anchorA: anchor1, anchorB: anchor2, joint: impulseJoint,
+  });
   return id;
 }
 

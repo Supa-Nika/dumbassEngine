@@ -41,15 +41,15 @@ async function init() {
   Scene.anchor(point2);
   Scene.anchor(point3);
 
-  Scene.createJoint(point1, page, 10, 5000, 1);
-  Scene.createJoint(point2, page, 10, 5000, 1);
-  Scene.createJoint(point3, page, 10, 5000, 1);
+  Scene.createJoint(point1, page, 1, 50000, 1, { anchorB: { x: -96/2, y: 54/2, z: 0 }});
+  Scene.createJoint(point3, page, 1, 50000, 1, { anchorB: { x: 96/2, y: 54/2, z: 0 }});
 
 
   // Scene.setCameraFollowTarget(point2);
 
   // for (let index = 0; index < 10000; index++) {
   //   const ball = await Scene.createBall(Math.random(), 5, Math.random());
+  //   // Scene.setCameraFollowTarget(ball);
   // }
 
   
