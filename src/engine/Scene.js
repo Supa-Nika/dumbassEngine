@@ -386,10 +386,6 @@ class Scene {
   }
 
   getObjectPosition(id) {
-    return this.getObject3D(id)?.position ?? null;
-  }
-
-  getObjectPosition(id) {
     const modelEntry = this.modelMeshes.get(id);
     if (modelEntry && modelEntry.mesh) return modelEntry.mesh.position;
 
