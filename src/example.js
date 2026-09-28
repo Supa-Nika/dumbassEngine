@@ -27,7 +27,10 @@ async function init() {
   // Scene.setCameraFollowTarget(object);
   Scene.createJoint(ball, object, 10, 100, 10);
 
-  const page = await Scene.createHTML(0, 25, 10, 10, '/src/assets/demo.html', { width: 96 , height: 54 });
+  const page = await Scene.createHTML(
+    0, 25, 10, 10,
+    import.meta.env.BASE_URL + 'demo.html', { width: 96, height: 54 }
+  );
 
   // Scene.anchor(page);
 

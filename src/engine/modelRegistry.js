@@ -1,7 +1,7 @@
 export const MODELS = {
   car: {
-    obj: '/src/assets/Car.obj',
-    mtl: '/src/assets/Car.mtl',
+    obj: new URL('../assets/Car.obj', import.meta.url).href,
+    mtl: new URL('../assets/Car.mtl', import.meta.url).href,
     baseSize: 3.0,
     halfExtents: { x: 1.0, y: 0.8, z: 2.2 },
   },

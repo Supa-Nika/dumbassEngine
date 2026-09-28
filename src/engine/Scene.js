@@ -148,7 +148,9 @@ class Scene {
     light.position.set(5, 10, 5);
     this.scene.add(light);
 
-    const groundTexture = await TextureAssets.loadTexture('/src/assets/missing.png');
+    const groundTexture = await TextureAssets.loadTexture(
+      new URL('../assets/missing.png', import.meta.url).href
+    );
 
     const groundMesh = new THREE.Mesh(
       new THREE.BoxGeometry(1000, 0.2, 1000),
