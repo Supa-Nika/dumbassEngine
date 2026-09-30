@@ -531,6 +531,23 @@ class Scene {
     });
   }
 
+  setCamera(x, y, z) {
+    if (!this.camera) return;
+    this.followTarget = null; // otherwise updateCamera() lerps it straight back
+    this.camera.position.set(x, y, z);
+  }
+
+  remove(obj) {
+    if (!this.worker) return false;
+    const id = typeof obj === 'number' ? obj : obj?.userData?.physicsId;
+    if (id == null) {
+      console.warn('remove: could not resolve a physics id', obj);
+      return false;
+    }
+    this.worker.postMessage({ type: 'REMOVE', payload: { id } });
+    return true;
+  }
+
   setAnchored(obj, anchored) {
     if (!this.worker) return false;
     const id = typeof obj === 'number' ? obj : obj?.userData?.physicsId;

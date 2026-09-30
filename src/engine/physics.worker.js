@@ -122,20 +122,7 @@ function stepPhysics() {
   world.step();
 
   for (let i = objects.length - 1; i >= 0; i--) {
-    if (objects[i].body.translation().y < -50) {
-      const removedId = objects[i].id;
-
-      if (grab?.obj.id === removedId) grab = null; // must happen before the body is removed
-
-      world.removeRigidBody(objects[i].body);
-      objects.splice(i, 1);
-
-      for (let j = relations.length - 1; j >= 0; j--) {
-        if (relations[j].idA === removedId || relations[j].idB === removedId) {
-          relations.splice(j, 1);
-        }
-      }
-    }
+    if (objects[i].body.translation().y < -50) removeObject(i);
   }
 }
 
@@ -264,6 +251,11 @@ self.onmessage = async (e) => {
     if (obj) setAnchored(obj, payload.anchored);
   }
 
+  if (type === 'REMOVE' && world) {
+    const i = objects.findIndex((o) => o.id === payload.id);
+    if (i !== -1) removeObject(i);
+  }
+
   if (type === 'UPDATE_GRAB' && world) updateGrab(payload);
 };
 
@@ -333,5 +325,20 @@ function setAnchored(obj, anchored) {
     body.setBodyType(RAPIER.RigidBodyType.Fixed, true);
   } else {
     body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+  }
+}
+
+function removeObject(index) {
+  const removedId = objects[index].id;
+
+  if (grab?.obj.id === removedId) grab = null; // must happen before the body is removed
+
+  world.removeRigidBody(objects[index].body);
+  objects.splice(index, 1);
+
+  for (let j = relations.length - 1; j >= 0; j--) {
+    if (relations[j].idA === removedId || relations[j].idB === removedId) {
+      relations.splice(j, 1);
+    }
   }
 }
